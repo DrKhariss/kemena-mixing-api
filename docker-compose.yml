@@ -1,0 +1,38 @@
+services:
+  mysql:
+    image: mysql:8.4.5
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: mixing_root
+      MYSQL_DATABASE: kemena_mixing
+      MYSQL_USER: mixing
+      MYSQL_PASSWORD: mixing
+    ports:
+      - "3306:3306"
+    volumes:
+      - mixing_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pmixing_root"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: mixing
+      MYSQL_PASSWORD: mixing
+      MYSQL_DATABASE: kemena_mixing
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mixing_mysql_data:
