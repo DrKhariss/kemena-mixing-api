@@ -23,8 +23,13 @@ function createPool() {
     return mysql.createPool(process.env.DATABASE_URL);
   }
 
+  // Prefer 127.0.0.1 over "localhost" — Node may resolve localhost to ::1 and
+  // mysql2 then fails with ECONNREFUSED on Hostinger / shared MySQL.
+  const rawHost = process.env.MYSQL_HOST || "127.0.0.1";
+  const host = rawHost === "localhost" ? "127.0.0.1" : rawHost;
+
   return mysql.createPool({
-    host: process.env.MYSQL_HOST || "127.0.0.1",
+    host,
     port: Number(process.env.MYSQL_PORT || 3306),
     user: requireEnv("MYSQL_USER"),
     password: process.env.MYSQL_PASSWORD ?? "",

@@ -9,13 +9,32 @@ config({ path: join(root, ".env.local") });
 
 const PORT = Number(process.env.PORT || 3001);
 
+let bootError = null;
+
+app.get("/", (_req, res) => {
+  if (bootError) {
+    return res.status(503).json({
+      ok: false,
+      error: bootError,
+      hint: "Check MYSQL_* env vars. Use MYSQL_HOST=127.0.0.1 (not localhost). Do not set PORT on Hostinger.",
+    });
+  }
+  return res.json({ ok: true, service: "kemena-mixing-api" });
+});
+
 try {
   await boot();
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Mixing API running on http://localhost:${PORT}`);
-    console.log(`Health: http://localhost:${PORT}/mixing/api/config`);
-  });
 } catch (err) {
-  console.error("Failed to start Mixing API:", err.message);
-  process.exit(1);
+  bootError = err?.message || String(err);
+  console.error("Failed to boot Mixing API:", err);
 }
+
+// Always listen so Hostinger proxies to a live process (avoids opaque CDN 503).
+app.listen(PORT, () => {
+  console.log(`Mixing API listening on port ${PORT}`);
+  if (bootError) {
+    console.error(`Boot incomplete: ${bootError}`);
+  } else {
+    console.log(`Health: http://localhost:${PORT}/mixing/api/config`);
+  }
+});
