@@ -1,0 +1,25 @@
+{
+  "name": "kemena-mixing-api",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Mid-Side mixing subscription API (Express + MySQL) for Kemena",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "NODE_ENV=production node src/index.js",
+    "db:up": "docker compose up -d mysql",
+    "db:down": "docker compose down"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.23.2"
+  }
+}
