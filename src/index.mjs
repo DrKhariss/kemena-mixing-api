@@ -4,14 +4,11 @@ import { fileURLToPath } from "url";
 import { app, boot } from "./app.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-config({ path: join(root, ".env") });
-config({ path: join(root, ".env.local") });
+config({ path: join(root, ".env"), quiet: true });
+config({ path: join(root, ".env.local"), quiet: true });
 
-// Hostinger injects PORT — do not set it in Hostinger env. Local .env can set PORT=3001.
-const PORT = process.env.PORT;
-if (!PORT) {
-  throw new Error("PORT is missing");
-}
+// Prefer platform PORT when present; Hostinger often omits it — fall back to 3000.
+const PORT = Number(process.env.PORT || 3000);
 
 let bootError = null;
 
@@ -26,7 +23,7 @@ app.get("/", (_req, res) => {
     return res.status(503).json({
       ok: false,
       error: bootError,
-      hint: "Check MYSQL_* env vars. Use MYSQL_HOST=127.0.0.1 (not localhost). Do not set PORT on Hostinger.",
+      hint: "Check MYSQL_* env vars. Use MYSQL_HOST=127.0.0.1 (not localhost).",
     });
   }
   return res.json({ ok: true, service: "kemena-mixing-api" });

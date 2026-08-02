@@ -46,8 +46,8 @@ import {
 } from "./plans.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-config({ path: join(root, ".env") });
-config({ path: join(root, ".env.local") });
+config({ path: join(root, ".env"), quiet: true });
+config({ path: join(root, ".env.local"), quiet: true });
 
 export async function boot() {
   await initDb();
