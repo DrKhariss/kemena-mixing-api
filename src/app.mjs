@@ -11,7 +11,7 @@ import {
   clearAuthCookie,
   setAuthCookie,
   signToken,
-} from "./auth.js";
+} from "./auth.mjs";
 import {
   activateSubscription,
   createMixRequest,
@@ -36,14 +36,14 @@ import {
   updateSubscriptionAdmin,
   upsertSubscriber,
   verifyUserPassword,
-} from "./db.js";
+} from "./db.mjs";
 import {
   inferPlanId,
   isPaystackConfigured,
   makeReceiptCode,
   PLANS,
   verifyPaystack,
-} from "./plans.js";
+} from "./plans.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 config({ path: join(root, ".env") });
