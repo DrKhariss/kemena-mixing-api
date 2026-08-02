@@ -7,8 +7,8 @@ import { fileURLToPath } from "url";
 import { addMonths, PLANS } from "./plans.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-config({ path: join(root, ".env") });
-config({ path: join(root, ".env.local") });
+config({ path: join(root, ".env"), quiet: true });
+config({ path: join(root, ".env.local"), quiet: true });
 
 function requireEnv(name) {
   const value = process.env[name];
