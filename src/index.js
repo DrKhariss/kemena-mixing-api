@@ -7,10 +7,20 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 config({ path: join(root, ".env") });
 config({ path: join(root, ".env.local") });
 
-const PORT = Number(process.env.PORT || 3001);
+// Hostinger injects PORT — do not set it in Hostinger env. Local .env can set PORT=3001.
+const PORT = process.env.PORT;
+if (!PORT) {
+  throw new Error("PORT is missing");
+}
 
 let bootError = null;
 
+// Liveness: process is up (Hostinger / probes). Do not tie this to DB boot.
+app.get("/health", (_req, res) => {
+  return res.json({ ok: true, service: "kemena-mixing-api" });
+});
+
+// Readiness: includes DB/boot status.
 app.get("/", (_req, res) => {
   if (bootError) {
     return res.status(503).json({
@@ -29,12 +39,11 @@ try {
   console.error("Failed to boot Mixing API:", err);
 }
 
-// Always listen so Hostinger proxies to a live process (avoids opaque CDN 503).
-app.listen(PORT, () => {
-  console.log(`Mixing API listening on port ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Mixing API listening on ${PORT}`);
   if (bootError) {
     console.error(`Boot incomplete: ${bootError}`);
   } else {
-    console.log(`Health: http://localhost:${PORT}/mixing/api/config`);
+    console.log(`Health: http://localhost:${PORT}/health`);
   }
 });
