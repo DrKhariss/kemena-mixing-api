@@ -8,7 +8,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
+COPY start.cjs ./
 COPY src ./src
 USER node
 EXPOSE 3001
-CMD ["node", "src/index.js"]
+CMD ["node", "start.cjs"]

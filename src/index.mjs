@@ -1,7 +1,7 @@
 import { config } from "dotenv";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { app, boot } from "./app.js";
+import { app, boot } from "./app.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 config({ path: join(root, ".env") });

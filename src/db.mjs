@@ -4,7 +4,7 @@ import { config } from "dotenv";
 import mysql from "mysql2/promise";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { addMonths, PLANS } from "./plans.js";
+import { addMonths, PLANS } from "./plans.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 config({ path: join(root, ".env") });
