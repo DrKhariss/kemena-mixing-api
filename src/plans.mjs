@@ -5,8 +5,8 @@ export const PLANS = {
     priceNgn: 2_000_000,
     tracks: "Unlimited",
     tracksAllowed: null,
-    durationMonths: 4,
-    duration: "4 months",
+    durationMonths: 3,
+    duration: "3 months",
     features: ["Dolby Atmos included"],
   },
   gold: {
