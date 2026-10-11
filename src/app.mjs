@@ -35,7 +35,9 @@ import {
   listSubscribers,
   markPasswordResetTokenUsed,
   markTermsAccepted,
+  restoreUser,
   setUserPassword,
+  softDeleteUser,
   updateMixRequestBySubscriber,
   updateMixRequestStatus,
   updateSubscriptionAdmin,
@@ -200,6 +202,12 @@ app.post("/mixing/api/signup", async (req, res) => {
   }
 
   const existing = await getUserByEmail(email);
+  if (existing?.deleted_at) {
+    return res.status(403).json({
+      error: "This account is disabled. Contact Mid-Side support to restore access.",
+    });
+  }
+
   const user = await upsertSubscriber({ email, fullName });
   if (!existing) {
     notifyWelcome(user);
@@ -230,7 +238,7 @@ app.post("/mixing/api/auth/login", async (req, res) => {
   const { email, password } = req.body || {};
   const user = await getUserByEmail(email);
 
-  if (!user || !verifyUserPassword(user, password)) {
+  if (!user || user.deleted_at || !verifyUserPassword(user, password)) {
     return res.status(401).json({ error: "Invalid email or password." });
   }
 
@@ -251,7 +259,7 @@ app.post("/mixing/api/auth/setup-password", async (req, res) => {
   }
 
   const user = await getUserByEmail(email);
-  if (!user) {
+  if (!user || user.deleted_at) {
     return res.status(404).json({ error: "Account not found." });
   }
 
@@ -283,7 +291,7 @@ app.post("/mixing/api/auth/forgot-password", async (req, res) => {
   }
 
   const user = await getUserByEmail(email);
-  if (user?.password_hash) {
+  if (user?.password_hash && !user.deleted_at) {
     const rawToken = await createPasswordResetToken(user.id);
     notifyPasswordReset(user, rawToken);
   }
@@ -302,6 +310,11 @@ app.post("/mixing/api/auth/reset-password", async (req, res) => {
     return res.status(400).json({ error: found.error });
   }
 
+  const account = await getUserById(found.userId);
+  if (!account || account.deleted_at) {
+    return res.status(400).json({ error: "This reset link is no longer valid." });
+  }
+
   const updated = await setUserPassword(found.userId, password);
   await markPasswordResetTokenUsed(found.id);
   const sessionToken = signToken(updated);
@@ -311,8 +324,9 @@ app.post("/mixing/api/auth/reset-password", async (req, res) => {
 
 app.get("/mixing/api/auth/me", authMiddleware, async (req, res) => {
   const user = await getUserById(req.user.sub);
-  if (!user) {
-    return res.status(404).json({ error: "User not found." });
+  if (!user || user.deleted_at) {
+    clearAuthCookie(res);
+    return res.status(401).json({ error: "Account not found or disabled." });
   }
 
   const activeSubscription = await getActiveSubscriptionForUser(user.id);
@@ -336,6 +350,13 @@ app.post("/mixing/api/initiate-payment", async (req, res) => {
   }
   if (!email || !fullName) {
     return res.status(400).json({ error: "Email and full name are required." });
+  }
+
+  const existing = await getUserByEmail(email);
+  if (existing?.deleted_at) {
+    return res.status(403).json({
+      error: "This account is disabled. Contact Mid-Side support to restore access.",
+    });
   }
 
   const user = await upsertSubscriber({ email, fullName, termsAccepted: true });
@@ -532,9 +553,75 @@ app.get("/mixing/api/admin/stats", authMiddleware, adminMiddleware, async (_req,
   return res.json(await getAdminStats());
 });
 
-app.get("/mixing/api/admin/subscribers", authMiddleware, adminMiddleware, async (_req, res) => {
-  return res.json({ subscribers: await listSubscribers() });
+app.get("/mixing/api/admin/subscribers", authMiddleware, adminMiddleware, async (req, res) => {
+  return res.json({ subscribers: await listSubscribers({ q: req.query?.q }) });
 });
+
+app.delete("/mixing/api/admin/subscribers/:id", authMiddleware, adminMiddleware, async (req, res) => {
+  const result = await softDeleteUser(req.params.id);
+  if (!result) {
+    return res.status(404).json({ error: "Subscriber not found." });
+  }
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
+  return res.json({
+    ok: true,
+    subscriber: {
+      id: result.id,
+      email: result.email,
+      full_name: result.full_name,
+      deleted_at: result.deleted_at,
+      deleted: Boolean(result.deleted_at),
+    },
+  });
+});
+
+app.post(
+  "/mixing/api/admin/subscribers/:id/restore",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    const result = await restoreUser(req.params.id);
+    if (!result) {
+      return res.status(404).json({ error: "Subscriber not found." });
+    }
+    return res.json({
+      ok: true,
+      subscriber: {
+        id: result.id,
+        email: result.email,
+        full_name: result.full_name,
+        deleted_at: result.deleted_at,
+        deleted: Boolean(result.deleted_at),
+      },
+    });
+  },
+);
+
+app.post(
+  "/mixing/api/admin/subscribers/:id/send-reset",
+  authMiddleware,
+  adminMiddleware,
+  async (req, res) => {
+    const user = await getUserById(req.params.id);
+    if (!user || user.role !== "subscriber") {
+      return res.status(404).json({ error: "Subscriber not found." });
+    }
+    if (user.deleted_at) {
+      return res.status(400).json({ error: "Restore the account before sending a reset email." });
+    }
+    if (!user.password_hash) {
+      return res.status(400).json({
+        error: "This artist has no password yet. They can set one from their receipt page.",
+      });
+    }
+
+    const rawToken = await createPasswordResetToken(user.id);
+    notifyPasswordReset(user, rawToken);
+    return res.json({ ok: true, message: `Reset email queued for ${user.email}.` });
+  },
+);
 
 app.get("/mixing/api/admin/subscriptions", authMiddleware, adminMiddleware, async (_req, res) => {
   return res.json({ subscriptions: await listAllSubscriptions() });
@@ -552,10 +639,14 @@ app.patch("/mixing/api/admin/subscriptions/:id", authMiddleware, adminMiddleware
 
   const updated = await updateSubscriptionAdmin(req.params.id, {
     tracksUsed: req.body?.tracks_used,
+    tracksAllowed: req.body?.tracks_allowed,
     status: req.body?.status,
   });
   if (!updated) {
     return res.status(404).json({ error: "Subscription not found." });
+  }
+  if (updated.error) {
+    return res.status(400).json({ error: updated.error });
   }
 
   if (req.body?.status && req.body.status !== before.status) {
