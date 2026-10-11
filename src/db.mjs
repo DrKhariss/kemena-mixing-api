@@ -4,7 +4,7 @@ import { config } from "dotenv";
 import mysql from "mysql2/promise";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { addMonths, PLANS } from "./plans.mjs";
+import { addMonths, getPlan } from "./plans.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 config({ path: join(root, ".env"), quiet: true });
@@ -107,6 +107,7 @@ export async function initDb() {
       stem_link TEXT NULL,
       reference_links TEXT NULL,
       notes TEXT NULL,
+      mix_format VARCHAR(16) NOT NULL DEFAULT 'stereo',
       status VARCHAR(32) NOT NULL DEFAULT 'submitted',
       revision_count INT NOT NULL DEFAULT 0,
       admin_notes TEXT NULL,
@@ -157,6 +158,7 @@ async function ensureMixRequestColumns() {
     ["revision_count", "INT NOT NULL DEFAULT 0"],
     ["admin_notes", "TEXT NULL"],
     ["delivery_link", "TEXT NULL"],
+    ["mix_format", "VARCHAR(16) NOT NULL DEFAULT 'stereo'"],
   ];
 
   for (const [name, type] of additions) {
@@ -251,7 +253,8 @@ export function verifyUserPassword(user, password) {
 }
 
 export async function createPendingSubscription(userId, planId, reference, receiptCode) {
-  const plan = PLANS[planId];
+  const plan = getPlan(planId);
+  if (!plan) throw new Error("Invalid plan selected.");
   const id = randomUUID();
   const timestamp = now();
 
@@ -260,7 +263,7 @@ export async function createPendingSubscription(userId, planId, reference, recei
       (id, user_id, plan_id, status, amount_ngn, paystack_reference, receipt_code,
        tracks_allowed, tracks_used, created_at)
      VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, 0, ?)`,
-    [id, userId, planId, plan.priceNgn, reference, receiptCode, plan.tracksAllowed, timestamp],
+    [id, userId, plan.id, plan.priceNgn, reference, receiptCode, plan.tracksAllowed, timestamp],
   );
 
   return getSubscriptionByReference(reference);
@@ -270,9 +273,9 @@ export async function activateSubscription(reference, paidAt) {
   const sub = await getSubscriptionByReference(reference);
   if (!sub) return null;
 
-  const plan = PLANS[sub.plan_id];
+  const plan = getPlan(sub.plan_id);
   const startsAt = paidAt || now();
-  const expiresAt = addMonths(startsAt, plan.durationMonths);
+  const expiresAt = addMonths(startsAt, plan?.durationMonths || 1);
 
   await query(
     `UPDATE subscriptions
@@ -310,6 +313,22 @@ export async function getSubscriptionsForUser(userId) {
   return query("SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC", [userId]);
 }
 
+export async function countMixFormatsForSubscription(subscriptionId) {
+  const rows = await query(
+    `SELECT mix_format AS format, COUNT(*) AS count
+     FROM mix_requests
+     WHERE subscription_id = ?
+     GROUP BY mix_format`,
+    [subscriptionId],
+  );
+  const counts = { stereo: 0, atmos: 0 };
+  for (const row of rows) {
+    const key = row.format === "atmos" ? "atmos" : "stereo";
+    counts[key] = Number(row.count) || 0;
+  }
+  return counts;
+}
+
 export async function createMixRequest(userId, subscriptionId, payload) {
   const id = randomUUID();
   const timestamp = now();
@@ -322,7 +341,9 @@ export async function createMixRequest(userId, subscriptionId, payload) {
     stemLink,
     referenceLinks,
     notes,
+    mixFormat = "stereo",
   } = payload;
+  const format = mixFormat === "atmos" ? "atmos" : "stereo";
 
   const conn = await pool.getConnection();
   try {
@@ -330,8 +351,8 @@ export async function createMixRequest(userId, subscriptionId, payload) {
     await conn.execute(
       `INSERT INTO mix_requests (
         id, user_id, subscription_id, title, artist_name, genre, bpm, musical_key,
-        stem_link, reference_links, notes, status, revision_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 0, ?, ?)`,
+        stem_link, reference_links, notes, mix_format, status, revision_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 0, ?, ?)`,
       [
         id,
         userId,
@@ -344,6 +365,7 @@ export async function createMixRequest(userId, subscriptionId, payload) {
         stemLink?.trim() || null,
         referenceLinks?.trim() || null,
         notes?.trim() || null,
+        format,
         timestamp,
         timestamp,
       ],

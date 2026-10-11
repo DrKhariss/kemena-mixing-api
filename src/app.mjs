@@ -14,6 +14,7 @@ import {
 } from "./auth.mjs";
 import {
   activateSubscription,
+  countMixFormatsForSubscription,
   createMixRequest,
   createPasswordResetToken,
   createPendingSubscription,
@@ -50,10 +51,10 @@ import {
   notifyWelcome,
 } from "./mail/notify.mjs";
 import {
+  getPlan,
   inferPlanId,
   isPaystackConfigured,
   makeReceiptCode,
-  PLANS,
   verifyPaystack,
 } from "./plans.mjs";
 
@@ -105,13 +106,13 @@ function publicUser(user) {
 
 function subscriptionView(sub) {
   if (!sub) return null;
-  const plan = PLANS[sub.plan_id];
+  const plan = getPlan(sub.plan_id);
   const tracksRemaining =
     sub.tracks_allowed == null ? "Unlimited" : Math.max(sub.tracks_allowed - sub.tracks_used, 0);
 
   return {
     id: sub.id,
-    planId: sub.plan_id,
+    planId: plan?.id || sub.plan_id,
     planName: plan?.name || sub.plan_id,
     status: sub.status,
     amountNgn: sub.amount_ngn,
@@ -120,6 +121,8 @@ function subscriptionView(sub) {
     tracksAllowed: sub.tracks_allowed,
     tracksUsed: sub.tracks_used,
     tracksRemaining,
+    stereoTracks: plan?.stereoTracks ?? null,
+    atmosTracks: plan?.atmosTracks ?? null,
     startsAt: sub.starts_at,
     expiresAt: sub.expires_at,
     paidAt: sub.paid_at,
@@ -139,6 +142,7 @@ function mixRequestView(row) {
     stemLink: row.stem_link,
     referenceLinks: row.reference_links,
     notes: row.notes,
+    mixFormat: row.mix_format === "atmos" ? "atmos" : "stereo",
     status: row.status,
     revisionCount: row.revision_count || 0,
     adminNotes: row.admin_notes,
@@ -154,7 +158,7 @@ function mixRequestView(row) {
 }
 
 function buildReceiptPayload(sub, user) {
-  const plan = PLANS[sub.plan_id];
+  const plan = getPlan(sub.plan_id);
   return {
     ok: true,
     demo: !isPaystackConfigured(),
@@ -162,10 +166,10 @@ function buildReceiptPayload(sub, user) {
     receiptCode: sub.receipt_code,
     fullName: user.full_name,
     email: user.email,
-    planId: sub.plan_id,
-    planName: plan.name,
-    tracks: plan.tracks,
-    duration: plan.duration,
+    planId: plan?.id || sub.plan_id,
+    planName: plan?.name || sub.plan_id,
+    tracks: plan?.tracks || "—",
+    duration: plan?.duration || "—",
     amountNgn: sub.amount_ngn,
     paidAt: sub.paid_at,
     hasPassword: Boolean(user.password_hash),
@@ -325,7 +329,7 @@ app.get("/mixing/api/auth/me", authMiddleware, async (req, res) => {
 
 app.post("/mixing/api/initiate-payment", async (req, res) => {
   const { plan_id: planId, email, full_name: fullName } = req.body || {};
-  const plan = PLANS[planId];
+  const plan = getPlan(planId);
 
   if (!plan) {
     return res.status(400).json({ error: "Invalid plan selected." });
@@ -337,7 +341,7 @@ app.post("/mixing/api/initiate-payment", async (req, res) => {
   const user = await upsertSubscriber({ email, fullName, termsAccepted: true });
   const reference = `ms-${randomBytes(6).toString("hex")}`;
   const receiptCode = makeReceiptCode(reference);
-  await createPendingSubscription(user.id, planId, reference, receiptCode);
+  await createPendingSubscription(user.id, plan.id, reference, receiptCode);
 
   return res.json({
     ok: true,
@@ -378,11 +382,13 @@ app.post("/mixing/api/verify-payment", async (req, res) => {
     }
 
     const planId = tx.metadata?.plan_id || inferPlanId(tx.amount / 100);
-    if (!planId || planId !== sub.plan_id) {
+    const plan = getPlan(planId);
+    const subPlan = getPlan(sub.plan_id);
+    if (!plan || !subPlan || plan.id !== subPlan.id) {
       return res.status(402).json({ error: "Payment plan mismatch." });
     }
 
-    if (tx.amount !== PLANS[planId].priceNgn * 100) {
+    if (tx.amount !== plan.priceNgn * 100) {
       return res.status(402).json({ error: "Payment amount mismatch." });
     }
 
@@ -434,6 +440,7 @@ app.post("/mixing/api/mix-requests", authMiddleware, async (req, res) => {
     stem_link: stemLink,
     reference_links: referenceLinks,
     notes,
+    mix_format: mixFormatRaw,
   } = req.body || {};
 
   if (!title || title.trim().length < 2) {
@@ -442,6 +449,8 @@ app.post("/mixing/api/mix-requests", authMiddleware, async (req, res) => {
   if (!stemLink || !String(stemLink).trim()) {
     return res.status(400).json({ error: "Stem link is required (Drive, Dropbox, WeTransfer, etc.)." });
   }
+
+  const mixFormat = mixFormatRaw === "atmos" ? "atmos" : "stereo";
 
   const user = await getUserById(req.user.sub);
   const sub = await getActiveSubscriptionForUser(user.id);
@@ -457,6 +466,20 @@ app.post("/mixing/api/mix-requests", authMiddleware, async (req, res) => {
     return res.status(403).json({ error: "Your subscription has expired. Renew to submit mixes." });
   }
 
+  const plan = getPlan(sub.plan_id);
+  const formatCounts = await countMixFormatsForSubscription(sub.id);
+
+  if (mixFormat === "atmos") {
+    if (!plan || plan.atmosTracks === 0) {
+      return res.status(403).json({ error: "Dolby Atmos is not available on your plan." });
+    }
+    if (plan.atmosTracks != null && formatCounts.atmos >= plan.atmosTracks) {
+      return res.status(403).json({ error: "Dolby Atmos track limit reached for your plan." });
+    }
+  } else if (plan?.stereoTracks != null && formatCounts.stereo >= plan.stereoTracks) {
+    return res.status(403).json({ error: "Stereo track limit reached for your plan." });
+  }
+
   const mixRequest = await createMixRequest(user.id, sub.id, {
     title,
     artistName,
@@ -466,6 +489,7 @@ app.post("/mixing/api/mix-requests", authMiddleware, async (req, res) => {
     stemLink,
     referenceLinks,
     notes,
+    mixFormat,
   });
 
   const refreshedSub = await getSubscriptionById(sub.id);
@@ -536,7 +560,7 @@ app.patch("/mixing/api/admin/subscriptions/:id", authMiddleware, adminMiddleware
 
   if (req.body?.status && req.body.status !== before.status) {
     const user = await getUserById(updated.user_id);
-    const plan = PLANS[updated.plan_id];
+    const plan = getPlan(updated.plan_id);
     notifySubscriptionStatusChange({
       user,
       planName: plan?.name || updated.plan_id,
