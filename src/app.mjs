@@ -15,12 +15,15 @@ import {
 import {
   activateSubscription,
   createMixRequest,
+  createPasswordResetToken,
   createPendingSubscription,
   ensureAdminUser,
+  findValidPasswordResetToken,
   getActiveSubscriptionForUser,
   getAdminStats,
   getMixRequestById,
   getMixRequestsForUser,
+  getSubscriptionById,
   getSubscriptionByReference,
   getSubscriptionsForUser,
   getUserByEmail,
@@ -29,6 +32,7 @@ import {
   listAllMixRequests,
   listAllSubscriptions,
   listSubscribers,
+  markPasswordResetTokenUsed,
   markTermsAccepted,
   setUserPassword,
   updateMixRequestBySubscriber,
@@ -37,6 +41,14 @@ import {
   upsertSubscriber,
   verifyUserPassword,
 } from "./db.mjs";
+import {
+  notifyMixStatusChange,
+  notifyMixSubmitted,
+  notifyPasswordReset,
+  notifyPaymentActivated,
+  notifySubscriptionStatusChange,
+  notifyWelcome,
+} from "./mail/notify.mjs";
 import {
   inferPlanId,
   isPaystackConfigured,
@@ -130,6 +142,7 @@ function mixRequestView(row) {
     status: row.status,
     revisionCount: row.revision_count || 0,
     adminNotes: row.admin_notes,
+    deliveryLink: row.delivery_link,
     subscriptionId: row.subscription_id,
     receiptCode: row.receipt_code,
     planId: row.plan_id,
@@ -161,6 +174,17 @@ function buildReceiptPayload(sub, user) {
   };
 }
 
+async function activateAndNotify(reference, paidAt) {
+  const before = await getSubscriptionByReference(reference);
+  if (!before) return null;
+
+  const newlyActivated = before.status !== "active";
+  const sub = newlyActivated ? await activateSubscription(reference, paidAt) : before;
+  const user = await getUserById(sub.user_id);
+  notifyPaymentActivated({ user, sub, newlyActivated });
+  return { sub, user, newlyActivated };
+}
+
 app.get("/mixing/api/config", (_req, res) => {
   return res.json({ paystackConfigured: isPaystackConfigured() });
 });
@@ -171,7 +195,11 @@ app.post("/mixing/api/signup", async (req, res) => {
     return res.status(400).json({ error: "Valid email and full name are required." });
   }
 
+  const existing = await getUserByEmail(email);
   const user = await upsertSubscriber({ email, fullName });
+  if (!existing) {
+    notifyWelcome(user);
+  }
   return res.json({ ok: true, user: publicUser(user) });
 });
 
@@ -230,6 +258,45 @@ app.post("/mixing/api/auth/setup-password", async (req, res) => {
   const updated = await setUserPassword(user.id, password);
   const token = signToken(updated);
   setAuthCookie(res, token);
+  return res.json({ ok: true, user: publicUser(updated) });
+});
+
+app.post("/mixing/api/auth/forgot-password", async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  // Always return ok to avoid email enumeration.
+  const okPayload = {
+    ok: true,
+    message: "If that email has an account, we sent a reset link.",
+  };
+
+  if (!email) {
+    return res.json(okPayload);
+  }
+
+  const user = await getUserByEmail(email);
+  if (user?.password_hash) {
+    const rawToken = await createPasswordResetToken(user.id);
+    notifyPasswordReset(user, rawToken);
+  }
+
+  return res.json(okPayload);
+});
+
+app.post("/mixing/api/auth/reset-password", async (req, res) => {
+  const { token, password } = req.body || {};
+  if (!token || !password || password.length < 8) {
+    return res.status(400).json({ error: "Valid token and password (min 8 chars) are required." });
+  }
+
+  const found = await findValidPasswordResetToken(token);
+  if (found.error) {
+    return res.status(400).json({ error: found.error });
+  }
+
+  const updated = await setUserPassword(found.userId, password);
+  await markPasswordResetTokenUsed(found.id);
+  const sessionToken = signToken(updated);
+  setAuthCookie(res, sessionToken);
   return res.json({ ok: true, user: publicUser(updated) });
 });
 
@@ -295,9 +362,8 @@ app.post("/mixing/api/verify-payment", async (req, res) => {
   }
 
   if (!isPaystackConfigured()) {
-    sub = await activateSubscription(reference, new Date().toISOString());
-    const user = await getUserById(sub.user_id);
-    return res.json(buildReceiptPayload(sub, user));
+    const result = await activateAndNotify(reference, new Date().toISOString());
+    return res.json(buildReceiptPayload(result.sub, result.user));
   }
 
   try {
@@ -315,9 +381,8 @@ app.post("/mixing/api/verify-payment", async (req, res) => {
       return res.status(402).json({ error: "Payment amount mismatch." });
     }
 
-    sub = await activateSubscription(reference, tx.paid_at || tx.transaction_date);
-    const user = await getUserById(sub.user_id);
-    return res.json(buildReceiptPayload(sub, user));
+    const result = await activateAndNotify(reference, tx.paid_at || tx.transaction_date);
+    return res.json(buildReceiptPayload(result.sub, result.user));
   } catch (err) {
     return res.status(502).json({ error: err.message });
   }
@@ -336,12 +401,12 @@ app.get("/mixing/api/receipt", async (req, res) => {
 
   if (sub.status !== "active") {
     if (!isPaystackConfigured()) {
-      await activateSubscription(reference, new Date().toISOString());
+      await activateAndNotify(reference, new Date().toISOString());
     } else {
       try {
         const tx = await verifyPaystack(reference);
         if (tx.status === "success") {
-          await activateSubscription(reference, tx.paid_at || tx.transaction_date);
+          await activateAndNotify(reference, tx.paid_at || tx.transaction_date);
         }
       } catch {
         return res.status(404).json({ error: "Payment not completed yet." });
@@ -383,6 +448,10 @@ app.post("/mixing/api/mix-requests", authMiddleware, async (req, res) => {
     return res.status(403).json({ error: "Track limit reached for your current plan." });
   }
 
+  if (sub.expires_at && sub.expires_at < new Date().toISOString()) {
+    return res.status(403).json({ error: "Your subscription has expired. Renew to submit mixes." });
+  }
+
   const mixRequest = await createMixRequest(user.id, sub.id, {
     title,
     artistName,
@@ -393,6 +462,9 @@ app.post("/mixing/api/mix-requests", authMiddleware, async (req, res) => {
     referenceLinks,
     notes,
   });
+
+  const refreshedSub = await getSubscriptionById(sub.id);
+  notifyMixSubmitted({ user, mix: mixRequest, sub: refreshedSub || sub });
 
   return res.json({ ok: true, mixRequest: mixRequestView(mixRequest) });
 });
@@ -444,6 +516,11 @@ app.get("/mixing/api/admin/mix-requests", authMiddleware, adminMiddleware, async
 });
 
 app.patch("/mixing/api/admin/subscriptions/:id", authMiddleware, adminMiddleware, async (req, res) => {
+  const before = await getSubscriptionById(req.params.id);
+  if (!before) {
+    return res.status(404).json({ error: "Subscription not found." });
+  }
+
   const updated = await updateSubscriptionAdmin(req.params.id, {
     tracksUsed: req.body?.tracks_used,
     status: req.body?.status,
@@ -451,6 +528,17 @@ app.patch("/mixing/api/admin/subscriptions/:id", authMiddleware, adminMiddleware
   if (!updated) {
     return res.status(404).json({ error: "Subscription not found." });
   }
+
+  if (req.body?.status && req.body.status !== before.status) {
+    const user = await getUserById(updated.user_id);
+    const plan = PLANS[updated.plan_id];
+    notifySubscriptionStatusChange({
+      user,
+      planName: plan?.name || updated.plan_id,
+      status: updated.status,
+    });
+  }
+
   return res.json({ subscription: subscriptionView(updated) });
 });
 
@@ -461,9 +549,27 @@ app.patch("/mixing/api/admin/mix-requests/:id", authMiddleware, adminMiddleware,
     return res.status(400).json({ error: "Invalid status." });
   }
 
-  const updated = await updateMixRequestStatus(req.params.id, status, req.body?.admin_notes);
+  const existing = await getMixRequestById(req.params.id);
+  if (!existing) {
+    return res.status(404).json({ error: "Mix request not found." });
+  }
+
+  const updated = await updateMixRequestStatus(req.params.id, {
+    status,
+    adminNotes: req.body?.admin_notes,
+    deliveryLink: req.body?.delivery_link,
+  });
   if (!updated) {
     return res.status(404).json({ error: "Mix request not found." });
   }
+  if (updated.error) {
+    return res.status(400).json({ error: updated.error });
+  }
+
+  if (status !== existing.status && ["in_progress", "revision", "delivered"].includes(status)) {
+    const user = await getUserById(updated.user_id);
+    notifyMixStatusChange({ user, mix: updated, status });
+  }
+
   return res.json({ mixRequest: mixRequestView(updated) });
 });

@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { randomUUID } from "crypto";
+import { createHash, randomBytes, randomUUID } from "crypto";
 import { config } from "dotenv";
 import mysql from "mysql2/promise";
 import { dirname, join } from "path";
@@ -110,6 +110,7 @@ export async function initDb() {
       status VARCHAR(32) NOT NULL DEFAULT 'submitted',
       revision_count INT NOT NULL DEFAULT 0,
       admin_notes TEXT NULL,
+      delivery_link TEXT NULL,
       created_at VARCHAR(40) NOT NULL,
       updated_at VARCHAR(40) NOT NULL,
       KEY idx_mix_requests_user (user_id),
@@ -121,6 +122,21 @@ export async function initDb() {
   `);
 
   await ensureMixRequestColumns();
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id VARCHAR(36) PRIMARY KEY,
+      user_id VARCHAR(36) NOT NULL,
+      token_hash VARCHAR(64) NOT NULL,
+      expires_at VARCHAR(40) NOT NULL,
+      used_at VARCHAR(40) NULL,
+      created_at VARCHAR(40) NOT NULL,
+      KEY idx_password_reset_user (user_id),
+      KEY idx_password_reset_hash (token_hash),
+      CONSTRAINT fk_password_reset_user
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
 }
 
 async function ensureMixRequestColumns() {
@@ -140,6 +156,7 @@ async function ensureMixRequestColumns() {
     ["reference_links", "TEXT NULL"],
     ["revision_count", "INT NOT NULL DEFAULT 0"],
     ["admin_notes", "TEXT NULL"],
+    ["delivery_link", "TEXT NULL"],
   ];
 
   for (const [name, type] of additions) {
@@ -275,12 +292,17 @@ export async function getSubscriptionByReceipt(receiptCode) {
   return queryOne("SELECT * FROM subscriptions WHERE receipt_code = ?", [receiptCode]);
 }
 
+/** Max revision rounds per mix (terms). */
+export const MAX_MIX_REVISIONS = 2;
+
 export async function getActiveSubscriptionForUser(userId) {
+  const timestamp = now();
   return queryOne(
     `SELECT * FROM subscriptions
      WHERE user_id = ? AND status = 'active'
+       AND (expires_at IS NULL OR expires_at = '' OR expires_at >= ?)
      ORDER BY paid_at DESC LIMIT 1`,
-    [userId],
+    [userId, timestamp],
   );
 }
 
@@ -448,21 +470,36 @@ export async function listAllMixRequests() {
   );
 }
 
-export async function updateMixRequestStatus(id, status, adminNotes) {
+export async function updateMixRequestStatus(id, { status, adminNotes, deliveryLink } = {}) {
   const existing = await getMixRequestById(id);
   if (!existing) return null;
 
+  const enteringRevision = status === "revision" && existing.status !== "revision";
+  if (enteringRevision && (existing.revision_count || 0) >= MAX_MIX_REVISIONS) {
+    return {
+      error: `Maximum of ${MAX_MIX_REVISIONS} revisions already used for this mix.`,
+    };
+  }
+
+  const nextDelivery =
+    deliveryLink !== undefined ? deliveryLink?.trim() || null : existing.delivery_link;
+  if (status === "delivered" && !nextDelivery) {
+    return { error: "Delivery link is required when marking a mix as delivered." };
+  }
+
   const timestamp = now();
-  const revisionBump = status === "revision" && existing.status !== "revision" ? 1 : 0;
+  const revisionBump = enteringRevision ? 1 : 0;
+  const notesValue = adminNotes !== undefined ? adminNotes?.trim() || null : existing.admin_notes;
 
   await query(
     `UPDATE mix_requests
      SET status = ?,
-         admin_notes = COALESCE(?, admin_notes),
+         admin_notes = ?,
+         delivery_link = ?,
          revision_count = revision_count + ?,
          updated_at = ?
      WHERE id = ?`,
-    [status, adminNotes?.trim() || null, revisionBump, timestamp, id],
+    [status, notesValue, nextDelivery, revisionBump, timestamp, id],
   );
 
   return getMixRequestById(id);
@@ -476,6 +513,53 @@ export async function updateSubscriptionAdmin(id, { tracksUsed, status }) {
     await query("UPDATE subscriptions SET status = ? WHERE id = ?", [status, id]);
   }
   return queryOne("SELECT * FROM subscriptions WHERE id = ?", [id]);
+}
+
+export async function getSubscriptionById(id) {
+  return queryOne("SELECT * FROM subscriptions WHERE id = ?", [id]);
+}
+
+/** Create a one-time password reset token. Returns the raw token (email once). */
+export async function createPasswordResetToken(userId) {
+  const rawToken = randomBytes(32).toString("hex");
+  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+  const id = randomUUID();
+  const timestamp = now();
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+  await query("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL", [
+    timestamp,
+    userId,
+  ]);
+
+  await query(
+    `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [id, userId, tokenHash, expiresAt, timestamp],
+  );
+
+  return rawToken;
+}
+
+export async function findValidPasswordResetToken(rawToken) {
+  const tokenHash = createHash("sha256").update(String(rawToken || "")).digest("hex");
+  const row = await queryOne(
+    `SELECT * FROM password_reset_tokens
+     WHERE token_hash = ? AND used_at IS NULL
+     ORDER BY created_at DESC LIMIT 1`,
+    [tokenHash],
+  );
+
+  if (!row) return { error: "Invalid or expired reset link." };
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    return { error: "This reset link has expired. Request a new one." };
+  }
+
+  return { id: row.id, userId: row.user_id };
+}
+
+export async function markPasswordResetTokenUsed(id) {
+  await query("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?", [now(), id]);
 }
 
 export { pool };
