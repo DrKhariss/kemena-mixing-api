@@ -200,7 +200,12 @@ app.post("/mixing/api/signup", async (req, res) => {
   if (!existing) {
     notifyWelcome(user);
   }
-  return res.json({ ok: true, user: publicUser(user) });
+  return res.json({
+    ok: true,
+    user: publicUser(user),
+    existingAccount: Boolean(existing),
+    hasPassword: Boolean(user.password_hash),
+  });
 });
 
 app.post("/mixing/api/terms", async (req, res) => {
