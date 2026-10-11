@@ -1,4 +1,4 @@
-import { PLANS } from "../plans.mjs";
+import { getPlan } from "../plans.mjs";
 import { queueMail, sendMail } from "./client.mjs";
 import {
   adminNewMixEmail,
@@ -27,7 +27,7 @@ export function notifyWelcome(user) {
 export function notifyPaymentActivated({ user, sub, newlyActivated }) {
   if (!newlyActivated) return;
 
-  const plan = PLANS[sub.plan_id];
+  const plan = getPlan(sub.plan_id);
   queueMail(async () => {
     await deliver(
       user.email,

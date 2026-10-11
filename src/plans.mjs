@@ -4,42 +4,57 @@ export const PLANS = {
     name: "Platinum",
     priceNgn: 2_000_000,
     tracks: "Unlimited",
+    stereoTracks: null,
+    atmosTracks: null,
     tracksAllowed: null,
     durationMonths: 3,
     duration: "3 months",
-    features: ["Dolby Atmos included"],
+    features: ["Unlimited stereo mixes", "Dolby Atmos included", "Best for labels with multiple artistes"],
   },
   gold: {
     id: "gold",
     name: "Gold",
     priceNgn: 500_000,
-    tracks: "3 Dolby Atmos",
-    tracksAllowed: 3,
+    tracks: "8 stereo · 3 Atmos",
+    stereoTracks: 8,
+    atmosTracks: 3,
+    tracksAllowed: 11,
     durationMonths: 6,
     duration: "6 months",
-    features: ["3 Dolby Atmos tracks"],
+    features: ["8 stereo tracks", "3 Dolby Atmos tracks"],
   },
   silver: {
     id: "silver",
     name: "Silver",
     priceNgn: 300_000,
-    tracks: 6,
+    tracks: "6 stereo",
+    stereoTracks: 6,
+    atmosTracks: 0,
     tracksAllowed: 6,
     durationMonths: 3,
     duration: "3 months",
-    features: ["Stereo mixing & mastering"],
+    features: ["6 stereo tracks", "No Dolby Atmos on this plan"],
   },
-  monthly: {
-    id: "monthly",
-    name: "Monthly",
+  basic: {
+    id: "basic",
+    name: "Basic",
     priceNgn: 100_000,
-    tracks: "3 per month",
+    tracks: "3 stereo / month",
+    stereoTracks: 3,
+    atmosTracks: 0,
     tracksAllowed: 3,
     durationMonths: 1,
     duration: "1 month",
-    features: ["Most commonly used"],
+    features: ["Three stereo mixes per month", "Flexible entry point"],
   },
 };
+
+/** Resolve plan; maps legacy `monthly` id → Basic. */
+export function getPlan(planId) {
+  if (!planId) return null;
+  if (planId === "monthly") return PLANS.basic;
+  return PLANS[planId] || null;
+}
 
 export function addMonths(isoDate, months) {
   const date = new Date(isoDate);
