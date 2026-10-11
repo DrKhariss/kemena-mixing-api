@@ -123,6 +123,7 @@ export async function initDb() {
   `);
 
   await ensureMixRequestColumns();
+  await ensureUserColumns();
 
   await query(`
     CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -165,6 +166,19 @@ async function ensureMixRequestColumns() {
     if (!columns.has(name)) {
       await query(`ALTER TABLE mix_requests ADD COLUMN ${name} ${type}`);
     }
+  }
+}
+
+async function ensureUserColumns() {
+  const rows = await query(
+    `SELECT COLUMN_NAME AS name
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`,
+  );
+  const columns = new Set(rows.map((col) => col.name));
+
+  if (!columns.has("deleted_at")) {
+    await query("ALTER TABLE users ADD COLUMN deleted_at VARCHAR(40) NULL");
   }
 }
 
@@ -430,8 +444,11 @@ export async function getMixRequestsForUser(userId) {
 }
 
 export async function getAdminStats() {
-  const subscribers = (await queryOne("SELECT COUNT(*) AS count FROM users WHERE role = 'subscriber'"))
-    .count;
+  const subscribers = (
+    await queryOne(
+      "SELECT COUNT(*) AS count FROM users WHERE role = 'subscriber' AND deleted_at IS NULL",
+    )
+  ).count;
   const activeSubs = (
     await queryOne("SELECT COUNT(*) AS count FROM subscriptions WHERE status = 'active'")
   ).count;
@@ -454,23 +471,66 @@ export async function getAdminStats() {
   };
 }
 
-export async function listSubscribers() {
+export async function listSubscribers({ q } = {}) {
+  const needle = String(q || "").trim().toLowerCase();
+  const params = [];
+  let where = "WHERE u.role = 'subscriber'";
+  if (needle) {
+    where += " AND (LOWER(u.email) LIKE ? OR LOWER(u.full_name) LIKE ?)";
+    const like = `%${needle}%`;
+    params.push(like, like);
+  }
+
   const rows = await query(
-    `SELECT u.id, u.email, u.full_name, u.role, u.created_at, u.terms_accepted_at,
+    `SELECT u.id, u.email, u.full_name, u.role, u.created_at, u.terms_accepted_at, u.deleted_at,
             (u.password_hash IS NOT NULL) AS has_password,
             (
               SELECT COUNT(*) FROM subscriptions s WHERE s.user_id = u.id AND s.status = 'active'
             ) AS active_plans
      FROM users u
-     WHERE u.role = 'subscriber'
-     ORDER BY u.created_at DESC`,
+     ${where}
+     ORDER BY (u.deleted_at IS NULL) DESC, u.created_at DESC`,
+    params,
   );
 
   return rows.map((row) => ({
     ...row,
     has_password: Boolean(row.has_password),
     active_plans: Number(row.active_plans),
+    deleted: Boolean(row.deleted_at),
   }));
+}
+
+export async function softDeleteUser(id) {
+  const user = await getUserById(id);
+  if (!user) return null;
+  if (user.role === "admin") {
+    return { error: "Admin accounts cannot be deleted." };
+  }
+  if (user.deleted_at) {
+    return user;
+  }
+  const timestamp = now();
+  await query("UPDATE users SET deleted_at = ?, updated_at = ? WHERE id = ?", [
+    timestamp,
+    timestamp,
+    id,
+  ]);
+  return getUserById(id);
+}
+
+export async function restoreUser(id) {
+  const user = await getUserById(id);
+  if (!user) return null;
+  if (!user.deleted_at) {
+    return user;
+  }
+  const timestamp = now();
+  await query("UPDATE users SET deleted_at = NULL, updated_at = ? WHERE id = ?", [
+    timestamp,
+    id,
+  ]);
+  return getUserById(id);
 }
 
 export async function listAllSubscriptions() {
@@ -527,9 +587,27 @@ export async function updateMixRequestStatus(id, { status, adminNotes, deliveryL
   return getMixRequestById(id);
 }
 
-export async function updateSubscriptionAdmin(id, { tracksUsed, status }) {
+export async function updateSubscriptionAdmin(id, { tracksUsed, tracksAllowed, status }) {
   if (tracksUsed !== undefined) {
-    await query("UPDATE subscriptions SET tracks_used = ? WHERE id = ?", [tracksUsed, id]);
+    const used = Number(tracksUsed);
+    if (!Number.isFinite(used) || used < 0) {
+      return { error: "tracks_used must be a non-negative number." };
+    }
+    await query("UPDATE subscriptions SET tracks_used = ? WHERE id = ?", [Math.floor(used), id]);
+  }
+  if (tracksAllowed !== undefined) {
+    if (tracksAllowed === null || tracksAllowed === "") {
+      await query("UPDATE subscriptions SET tracks_allowed = NULL WHERE id = ?", [id]);
+    } else {
+      const allowed = Number(tracksAllowed);
+      if (!Number.isFinite(allowed) || allowed < 0) {
+        return { error: "tracks_allowed must be a non-negative number or null." };
+      }
+      await query("UPDATE subscriptions SET tracks_allowed = ? WHERE id = ?", [
+        Math.floor(allowed),
+        id,
+      ]);
+    }
   }
   if (status) {
     await query("UPDATE subscriptions SET status = ? WHERE id = ?", [status, id]);

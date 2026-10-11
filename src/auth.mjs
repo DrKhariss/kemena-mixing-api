@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import { getUserById } from "./db.mjs";
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev-jwt-secret-change-in-production";
 const COOKIE_NAME = "mixing_session";
@@ -44,7 +45,7 @@ export function readAuthToken(req) {
   return req.cookies?.[COOKIE_NAME] || null;
 }
 
-export function authMiddleware(req, res, next) {
+export async function authMiddleware(req, res, next) {
   const token = readAuthToken(req);
   if (!token) {
     return res.status(401).json({ error: "Not authenticated." });
@@ -53,6 +54,13 @@ export function authMiddleware(req, res, next) {
   if (!payload) {
     return res.status(401).json({ error: "Session expired. Please log in again." });
   }
+
+  const user = await getUserById(payload.sub);
+  if (!user || user.deleted_at) {
+    clearAuthCookie(res);
+    return res.status(401).json({ error: "Account not found or disabled." });
+  }
+
   req.user = payload;
   next();
 }
