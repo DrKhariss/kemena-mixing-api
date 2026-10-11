@@ -36,9 +36,13 @@ Tables are created on boot (`initDb`). Old SQLite files under `data/` are unused
 |------|---------|
 | `PORT` | Listen port (default `3001`) |
 | `CORS_ORIGIN` | Comma-separated frontend origins |
+| `FRONTEND_URL` | Public site origin for email CTAs (defaults to first `CORS_ORIGIN`) |
 | `PAYSTACK_PUBLIC_KEY` / `PAYSTACK_SECRET_KEY` | Real keys disable demo mode |
 | `JWT_SECRET` | Session signing |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Seeded admin user |
+| `RESEND_API_KEY` | Resend key; missing / `REPLACE` → console demo mail |
+| `MAIL_FROM` | Verified From address |
+| `MAIL_ADMIN_TO` | Desk alert inbox (defaults to `ADMIN_EMAIL`) |
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | MySQL connection |
 | `DATABASE_URL` | Optional `mysql://...` URI (overrides the `MYSQL_*` vars) |
 
@@ -58,3 +62,8 @@ Production cookies use `SameSite=None; Secure` so cross-origin login works.
 ## Routes
 
 All under `/mixing/api/*` (signup, terms, Paystack, auth, mix requests, admin).
+
+Auth extras: `POST /auth/forgot-password`, `POST /auth/reset-password`.
+
+Transactional emails (welcome, receipt, mix status, admin desk alerts, password reset)
+send via Resend when configured; otherwise they log as `[mail:demo]`.
